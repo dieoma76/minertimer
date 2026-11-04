@@ -1,0 +1,55 @@
+# minertimer configuration
+# After installation this file lives at
+#   /Library/Application Support/minertimer/minertimer.conf  (root, 600)
+# Edit:  sudo vi "/Library/Application Support/minertimer/minertimer.conf"
+# Changes are picked up automatically, no restart needed.
+#
+# Values changed in Home Assistant stay in effect until the same value is
+# changed here. Then this file wins again.
+
+[general]
+# Language for notifications, announcements and Home Assistant entity names:
+# auto (system language of the Mac), de or en
+language = auto
+# Check interval in seconds
+interval = 15
+# More than this many seconds without mouse/keyboard input does not count as play time
+idle_seconds = 180
+# Warnings at this many minutes of remaining time
+warn_minutes = 10, 5, 1
+# Seconds between a polite quit (SIGTERM) and a forced quit (SIGKILL)
+kill_grace = 20
+# School holidays and public holidays count like weekends ("free day").
+# Format: YYYY-MM-DD or YYYY-MM-DD..YYYY-MM-DD, separate several with commas
+holidays =
+# Voice for announcements (empty = system voice), e.g. Samantha or Anna
+voice =
+
+[mqtt]
+# Optional connection to Home Assistant (MQTT discovery).
+# Without MQTT everything works locally.
+enabled = false
+host = homeassistant.local
+port = 1883
+username = minertimer
+password =
+discovery_prefix = homeassistant
+# Device name in Home Assistant (empty = computer name)
+device_name =
+
+# One section per macOS account that should be limited.
+# The name is the short account name (Terminal: id -un).
+[user CHILD]
+# Minutes on school days (Mon-Fri)
+weekday_minutes = 60
+# Minutes on free days (Sat, Sun, holidays)
+weekend_minutes = 120
+# Optional curfew during which no playing is allowed, e.g. 20:30-07:00
+curfew =
+# false = only count, never quit the game
+enabled = true
+
+# Another account, e.g. a second child:
+# [user child2]
+# weekday_minutes = 45
+# weekend_minutes = 90
