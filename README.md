@@ -77,6 +77,10 @@ All options are explained in [`minertimer.conf.example`](minertimer.conf.example
 | Limit active | switch (off = only count) |
 | Curfew | text `HH:MM-HH:MM`, empty = none |
 
+Example dashboard (German UI) with the entities as tiles:
+
+![minertimer in a Home Assistant dashboard](docs/home-assistant-dashboard.png)
+
 Values changed in Home Assistant stay in effect until the same value is changed in the configuration file. Then the file wins again. If Home Assistant or the broker is unreachable, the limit keeps working with the last known values.
 
 MQTT topics:

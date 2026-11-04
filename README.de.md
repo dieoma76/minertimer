@@ -77,6 +77,10 @@ Alle Optionen sind in [`minertimer.conf.example`](minertimer.conf.example) erkl�
 | Limit aktiv | Schalter (aus = nur z채hlen) |
 | Sperrzeit | Text `HH:MM-HH:MM`, leer = keine |
 
+Beispiel-Dashboard mit den Entit채ten als Kacheln:
+
+![minertimer in einem Home-Assistant-Dashboard](docs/home-assistant-dashboard.png)
+
 Werte, die in Home Assistant ge채ndert werden, gelten, bis derselbe Wert in der Konfigurationsdatei ge채ndert wird. Dann gewinnt wieder die Datei. Ist Home Assistant oder der Broker nicht erreichbar, l채uft das Limit mit den zuletzt bekannten Werten weiter.
 
 MQTT-Themen:
