@@ -351,6 +351,44 @@ class AccountTests(unittest.TestCase):
             make(MULTI + "\n[user bro]\naccounts = *\n")
 
 
+class MqttSleepTests(unittest.TestCase):
+    def _client(self):
+        import socket
+        a, b = socket.socketpair()
+        self.addCleanup(a.close)
+        self.addCleanup(b.close)
+        c = mt.MiniMQTT("h", 1883, "", "", "id", "w", "offline")
+        c.sock = a
+        c.last_send = c.last_recv = c.last_ping = mt.time.time()
+        return c
+
+    def test_gap_raises_quiet_error(self):
+        c = self._client()
+        c.last_loop = mt.time.time() - 600
+        with self.assertRaises(mt.MacWasAsleep):
+            c.loop(0)
+        self.assertFalse(c.connected)
+
+    def test_no_gap_no_error(self):
+        c = self._client()
+        c.last_loop = mt.time.time() - 5
+        c.loop(0)
+        self.assertTrue(c.connected)
+
+    @mock.patch.object(pwd, "getpwnam", return_value=FAKE_PW)
+    def test_bridge_reconnects_quietly(self, _):
+        timer, s, clock, store, path = make(CONF)
+        bridge = mt.HomeAssistantBridge(timer.cfg, timer)
+        bridge.client = self._client()
+        bridge.client.last_loop = mt.time.time() - 600
+        bridge.next_try = mt.time.time() + 999
+        with self.assertLogs("minertimer", level="DEBUG") as cm:
+            bridge.wait(0)
+        self.assertTrue(all(r.levelno < 20 for r in cm.records), cm.output)
+        self.assertEqual(bridge.next_try, 0.0)
+        self.assertGreater(bridge.quiet_until, mt.time.time())
+
+
 class LanguageTests(unittest.TestCase):
     def test_detect_language(self):
         import plistlib

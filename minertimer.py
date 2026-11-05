@@ -31,7 +31,7 @@ import sys
 import tempfile
 import time
 
-VERSION = "2.3.0"
+VERSION = "2.3.1"
 
 DEFAULT_CONFIG = "/Library/Application Support/minertimer/minertimer.conf"
 DEFAULT_STATE_DIR = "/var/db/minertimer"
@@ -725,6 +725,10 @@ def _mqtt_len(n):
             return bytes(out)
 
 
+class MacWasAsleep(ConnectionError):
+    """The connection is stale because the Mac slept, nothing is wrong."""
+
+
 class MiniMQTT:
     def __init__(self, host, port, username, password, client_id,
                  will_topic, will_payload, keepalive=60):
@@ -737,6 +741,7 @@ class MiniMQTT:
         self.last_send = 0.0
         self.last_recv = 0.0
         self.last_ping = 0.0
+        self.last_loop = 0.0
         self.packet_id = 0
         self.on_message = None
 
@@ -824,6 +829,12 @@ class MiniMQTT:
         end = time.time() + timeout
         while self.sock:
             now = time.time()
+            # a long gap means the Mac slept; the broker has dropped us meanwhile
+            gap = now - self.last_loop if self.last_loop else 0.0
+            self.last_loop = now
+            if gap > self.keepalive:
+                self.close()
+                raise MacWasAsleep("Mac was asleep for %d s" % gap)
             # ping even while we keep sending but receive nothing
             if (now - self.last_send >= self.keepalive / 2
                     or (now - self.last_recv >= self.keepalive / 2
@@ -890,6 +901,7 @@ class HomeAssistantBridge:
         self.next_try = 0.0
         self.backoff = 10.0
         self.last_published = {}
+        self.quiet_until = 0.0   # reconnects after sleep are logged at debug level only
 
     def _new_client(self):
         m = self.cfg.mqtt
@@ -906,17 +918,22 @@ class HomeAssistantBridge:
         if time.time() < self.next_try:
             return
         self.client = self._new_client()
+        quiet = time.time() < self.quiet_until
         try:
             self.client.connect()
             self.client.publish(self.avail, "online", retain=True)
-            self.publish_discovery()
+            self.publish_discovery(quiet=quiet)
             self.client.subscribe([self.base + "/+/set/+", "%s/status" % self.cfg.mqtt["discovery_prefix"]])
             self.last_published = {}
             self.backoff = 10.0
-            log.info("MQTT connected to %s:%s as %s", self.cfg.mqtt["host"],
-                     self.cfg.mqtt["port"], self.cfg.mqtt["username"] or "(anonymous)")
+            self.quiet_until = 0.0
+            log.log(logging.DEBUG if quiet else logging.INFO, "MQTT connected to %s:%s as %s",
+                    self.cfg.mqtt["host"], self.cfg.mqtt["port"],
+                    self.cfg.mqtt["username"] or "(anonymous)")
         except Exception as e:
-            log.warning("MQTT connection failed: %s (retry in %ds)", e, self.backoff)
+            # right after waking up the network may need a moment
+            log.log(logging.DEBUG if quiet else logging.WARNING,
+                    "MQTT connection failed: %s (retry in %ds)", e, self.backoff)
             self.client.close()
             self.next_try = time.time() + self.backoff
             self.backoff = min(self.backoff * 2, 300)
@@ -930,7 +947,7 @@ class HomeAssistantBridge:
             "sw_version": VERSION,
         }
 
-    def publish_discovery(self):
+    def publish_discovery(self, quiet=False):
         p = self.cfg.mqtt["discovery_prefix"]
         tx = self.cfg.texts
         for user in self.cfg.users:
@@ -998,7 +1015,8 @@ class HomeAssistantBridge:
                 "command_topic": setp + "curfew", "min": 0, "max": 11,
                 "pattern": r"^$|^\d{1,2}:\d{2}-\d{1,2}:\d{2}$", "icon": "mdi:sleep",
                 "entity_category": "config"})
-        log.info("Home Assistant discovery published for %s", ", ".join(self.cfg.users))
+        log.log(logging.DEBUG if quiet else logging.INFO,
+                "Home Assistant discovery published for %s", ", ".join(self.cfg.users))
 
     def users_by_slug(self):
         return {slug(u): u for u in self.cfg.users}
@@ -1053,6 +1071,12 @@ class HomeAssistantBridge:
         if self.client and self.client.connected:
             try:
                 self.client.loop(seconds)
+                return
+            except MacWasAsleep as e:
+                log.debug("MQTT: %s, reconnecting", e)
+                self.next_try = 0.0
+                self.backoff = 2.0
+                self.quiet_until = time.time() + 300
                 return
             except Exception as e:
                 log.warning("MQTT connection lost: %s", e)
