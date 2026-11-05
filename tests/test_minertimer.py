@@ -40,6 +40,18 @@ class FakeSystem:
     def console_uid(self):
         return self.console
 
+    USERS = {"kid": 1000, "bro": 1001, "dad": 1002, "other": 2000}
+    ADMINS = {"dad"}
+
+    def uid_of(self, name):
+        return self.USERS.get(name)
+
+    def name_of(self, uid):
+        return {v: k for k, v in self.USERS.items()}.get(uid, str(uid))
+
+    def is_admin(self, name):
+        return name in self.ADMINS
+
     def idle_seconds(self):
         return self.idle
 
@@ -265,6 +277,78 @@ class TimerTests(unittest.TestCase):
         run(timer, clock, 300)
         store2 = mt.Store(store.state_dir)
         self.assertAlmostEqual(store2.user("kid", timer.today())["used"], 300, delta=1)
+
+
+MULTI = CONF.replace("[user kid]", "[user kid]\naccounts = *")
+
+
+@mock.patch.object(pwd, "getpwnam", return_value=FAKE_PW)
+class AccountTests(unittest.TestCase):
+    def test_second_account_shares_budget(self, _):
+        timer, s, clock, store, _ = make(CONF.replace("[user kid]", "[user kid]\naccounts = other"))
+        s.console = 2000
+        s.procs = [(600, 2000, FORGE)]
+        timer.tick()
+        run(timer, clock, 600)
+        self.assertAlmostEqual(store.user("kid", timer.today())["used"], 600, delta=1)
+        self.assertEqual(timer.snapshot["kid"]["account"], "other")
+        self.assertEqual(s.notes[0][0], "other")   # message goes to the account in use
+        # switch back to the main account: same budget continues
+        s.console = 1000
+        s.procs = [(601, 1000, FORGE)]
+        run(timer, clock, 20 * 60 + 30)
+        self.assertIn((601, signal.SIGTERM), s.killed)
+        self.assertEqual(timer.snapshot["kid"]["status"], "gesperrt (Limit)")
+        # limit reached: starting in the other account is closed right away
+        s.console = 2000
+        s.procs = [(602, 2000, FORGE)]
+        timer.tick()
+        self.assertIn((602, signal.SIGTERM), s.killed)
+
+    def test_wildcard_counts_any_non_admin(self, _):
+        timer, s, clock, store, _ = make(MULTI)
+        s.console = 1001
+        s.procs = [(700, 1001, VANILLA)]
+        timer.tick()
+        run(timer, clock, 300)
+        self.assertAlmostEqual(store.user("kid", timer.today())["used"], 300, delta=1)
+        self.assertEqual(timer.snapshot["kid"]["account"], "bro")
+
+    def test_wildcard_skips_admins_and_exempt(self, _):
+        timer, s, clock, store, _ = make(MULTI.replace("kill_grace = 20",
+                                                       "kill_grace = 20\nexempt_users = other"))
+        for uid in (1002, 2000):
+            s.console = uid
+            s.procs = [(800 + uid, uid, FORGE)]
+            timer.tick()
+            run(timer, clock, 120)
+        self.assertEqual(store.user("kid", timer.today())["used"], 0)
+        self.assertEqual(timer.snapshot["kid"]["running"], "OFF")
+        # without exempt_admins the admin account counts too
+        timer, s, clock, store, _ = make(MULTI.replace("kill_grace = 20",
+                                                       "kill_grace = 20\nexempt_admins = false"))
+        s.console = 1002
+        s.procs = [(900, 1002, FORGE)]
+        timer.tick()
+        run(timer, clock, 120)
+        self.assertAlmostEqual(store.user("kid", timer.today())["used"], 120, delta=1)
+
+    def test_background_session_does_not_count_but_is_closed(self, _):
+        timer, s, clock, store, _ = make(MULTI)
+        s.console = 1001             # bro in front of the screen without a game
+        s.procs = [(950, 1000, FORGE)]  # kid's game left in a background session
+        timer.tick()
+        run(timer, clock, 600)
+        self.assertEqual(store.user("kid", timer.today())["used"], 0)
+        timer.stop_now("kid")
+        timer.tick()
+        self.assertIn((950, signal.SIGTERM), s.killed)
+
+    def test_config_validation(self, _):
+        with self.assertRaises(ValueError):
+            make(CONF + "\n[user bro]\naccounts = kid\n")
+        with self.assertRaises(ValueError):
+            make(MULTI + "\n[user bro]\naccounts = *\n")
 
 
 class LanguageTests(unittest.TestCase):

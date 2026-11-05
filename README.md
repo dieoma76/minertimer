@@ -8,12 +8,13 @@ Deutsche Anleitung: [README.de.md](README.de.md)
 
 ## Features
 
-- **Counts real play time only.** A second counts when Minecraft is running, the limited account is the one in front of the screen, and there was mouse or keyboard input in the last 3 minutes. A game left open in the background, a sleeping Mac or another logged-in user does not use up time.
+- **Counts real play time only.** A second counts when Minecraft is running, one of the child's accounts is the one in front of the screen, and there was mouse or keyboard input in the last 3 minutes. A game left open in the background, a sleeping Mac or another logged-in user does not use up time.
 - **Detects only the game.** It recognises the Minecraft client (vanilla, Forge, NeoForge, Fabric, Quilt). Other Java programs such as IDEs, build tools or a local server are left alone.
 - **Warns before the end.** At 10, 5 and 1 minutes left, the child gets a notification and a spoken announcement. When the game starts, a notification shows how much time is left today.
 - **Quits in two steps.** When time is up, Minecraft is first asked to quit and force-quit 20 seconds later. Starting it again closes it right away.
 - **Flexible limits.** You set separate limits for school days and free days (weekends plus holidays you list). An optional curfew, such as `20:30-07:00`, blocks playing completely.
-- **Several children and Macs.** Add one `[user …]` section per account and install it on each Mac.
+- **Per child, not per account.** With `accounts = *`, Minecraft in any non-administrator account counts towards the child's limit, including accounts added later. A second account no longer gets around the limit. You can also list accounts one by one (`accounts = emma, emma2`).
+- **Several children and Macs.** Add one `[user …]` section per child and install it on each Mac.
 - **German or English.** Notifications, announcements and Home Assistant entity names follow the Mac's system language, or a fixed `language = de|en`.
 - **Optional Home Assistant integration.** It connects via MQTT discovery. Home Assistant then shows play time, remaining time and status. You can change the limits, give a bonus, stop the game immediately, set the curfew and switch the limit on or off. **Without Home Assistant everything works the same**, configured by a file.
 - **Tamper-resistant.** The program, configuration and counters belong to root. The counters survive restarts, and the service restarts itself if it crashes.
@@ -64,11 +65,12 @@ All options are explained in [`minertimer.conf.example`](minertimer.conf.example
 
 1. Create a user for minertimer: Settings → People → Users. It should not be an administrator, and it should only be allowed to log in from the local network. The Mosquitto app accepts Home Assistant users without further setup. With another broker, create an MQTT user there.
 2. Answer "y" to the MQTT question in `install.sh` and enter the broker, user and password. Or set the `[mqtt]` section in the configuration later.
-3. A device **"Minertimer &lt;computer name&gt;"** appears with these entities for each limited account:
+3. A device **"Minertimer &lt;computer name&gt;"** appears with these entities for each child:
 
 | Entity | Type |
 |---|---|
 | Played today, Remaining today, Allowed today, Status | sensors |
+| Playing in account | sensor: the macOS account Minecraft is running in, otherwise `-` |
 | Playing now | binary sensor |
 | Limit school day, Limit free day | number (configuration) |
 | Bonus today | number, reset at midnight |
@@ -84,15 +86,17 @@ Example dashboard (German UI) with the entities as tiles:
 Values changed in Home Assistant stay in effect until the same value is changed in the configuration file. Then the file wins again. If Home Assistant or the broker is unreachable, the limit keeps working with the last known values.
 
 MQTT topics:
-- state: `minertimer/<mac>/<account>/state` (JSON, retained)
-- commands: `minertimer/<mac>/<account>/set/<field>`
+- state: `minertimer/<mac>/<child>/state` (JSON, retained)
+- commands: `minertimer/<mac>/<child>/set/<field>`
 - availability: `minertimer/<mac>/status`
 
 ## Limits
 
 minertimer is a parental tool, not a security product. It does **not** help if:
 - the child has an administrator account
-- the child plays in another account that has no `[user …]` section
+- the child plays in an administrator account or an account in `exempt_users` (Minecraft in accounts that are not limited is logged as a warning)
+- without `accounts = *`, the child plays in an account that is not listed in `accounts`
+- the child plays in a browser (clones such as Eaglercraft are not a Java process)
 - the child plays on a different device
 
 ## Background

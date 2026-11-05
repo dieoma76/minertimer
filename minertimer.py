@@ -2,8 +2,9 @@
 """minertimer: daily time limit for Minecraft Java Edition on macOS.
 
 Runs as a LaunchDaemon (root). Only real play time is counted: Minecraft is
-running, the limited user is the one in front of the screen, and there was
-recent mouse or keyboard input. Optionally connects to Home Assistant via
+running, one of the child's accounts is the one in front of the screen, and
+there was recent mouse or keyboard input. A child can own several macOS
+accounts (or all non-admin accounts), which share one daily budget. Optionally connects to Home Assistant via
 MQTT discovery (sensors, limits, bonus, switches).
 
 Python standard library only (tested with /usr/bin/python3 3.9 from the
@@ -13,6 +14,7 @@ Command Line Tools).
 import argparse
 import configparser
 import datetime as dt
+import grp
 import json
 import logging
 import logging.handlers
@@ -29,7 +31,7 @@ import sys
 import tempfile
 import time
 
-VERSION = "2.2.0"
+VERSION = "2.3.0"
 
 DEFAULT_CONFIG = "/Library/Application Support/minertimer/minertimer.conf"
 DEFAULT_STATE_DIR = "/var/db/minertimer"
@@ -64,6 +66,7 @@ STRINGS = {
         "e_running": "Minecraft läuft", "e_weekday": "Limit Schultag",
         "e_weekend": "Limit freier Tag", "e_bonus": "Bonus heute", "e_bonus_15": "+15 min Bonus",
         "e_stop": "Stop jetzt", "e_enabled": "Limit aktiv", "e_curfew": "Sperrzeit",
+        "e_account": "Spielt im Konto",
     },
     "en": {
         "minutes": ("%d minute", "%d minutes"),
@@ -87,6 +90,7 @@ STRINGS = {
         "e_running": "Minecraft running", "e_weekday": "Limit school day",
         "e_weekend": "Limit free day", "e_bonus": "Bonus today", "e_bonus_15": "+15 min bonus",
         "e_stop": "Stop now", "e_enabled": "Limit active", "e_curfew": "Curfew",
+        "e_account": "Playing in account",
     },
 }
 
@@ -168,6 +172,30 @@ class MacSystem:
             if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
                 procs.append((int(parts[0]), int(parts[1]), parts[2]))
         return procs
+
+    def uid_of(self, name):
+        try:
+            return pwd.getpwnam(name).pw_uid
+        except KeyError:
+            return None
+
+    def name_of(self, uid):
+        try:
+            return pwd.getpwuid(uid).pw_name
+        except KeyError:
+            return str(uid)
+
+    def is_admin(self, name):
+        try:
+            g = grp.getgrnam("admin")
+        except KeyError:
+            return False
+        if name in g.gr_mem:
+            return True
+        try:
+            return pwd.getpwnam(name).pw_gid == g.gr_gid
+        except KeyError:
+            return False
 
     def console_uid(self):
         try:
@@ -265,6 +293,10 @@ def parse_holidays(text):
     return ranges
 
 
+def split_list(text):
+    return [x for x in re.split(r"[,\s]+", str(text or "")) if x]
+
+
 def to_bool(v):
     if isinstance(v, bool):
         return v
@@ -286,6 +318,8 @@ class Config:
         self.kill_grace = float(g.get("kill_grace", 20))
         self.holidays = parse_holidays(g.get("holidays", ""))
         self.voice = str(g.get("voice", "")).strip()
+        self.exempt_users = set(split_list(g.get("exempt_users", "")))
+        self.exempt_admins = to_bool(g.get("exempt_admins", "true"))
         lang = str(g.get("language", "auto")).strip().lower() or "auto"
         self.language = detect_language() if lang == "auto" else lang
         self.texts = Texts(self.language)
@@ -314,9 +348,23 @@ class Config:
                 "enabled": to_bool(s.get("enabled", "true")),
             }
             parse_curfew(u["curfew"])  # validate early
+            accounts = split_list(s.get("accounts", ""))
+            u["wildcard"] = "*" in accounts
+            u["accounts"] = tuple(dict.fromkeys(
+                [name] + [a for a in accounts if a != "*" and a != name]))
             self.users[name] = u
         if not self.users:
             raise ValueError("No [user <name>] sections in %s" % path)
+        owner = {}
+        for name, u in self.users.items():
+            for a in u["accounts"]:
+                if a in owner:
+                    raise ValueError("Account %s is listed for both %s and %s" % (a, owner[a], name))
+                owner[a] = name
+        wild = [n for n, u in self.users.items() if u["wildcard"]]
+        if len(wild) > 1:
+            raise ValueError("accounts = * is only allowed for one child, not for %s" % ", ".join(wild))
+        self.wildcard_user = wild[0] if wild else None
 
     def is_free_day(self, day):
         if day.weekday() >= 5:
@@ -483,6 +531,36 @@ class Timer:
 
     # ---- one cycle ----
 
+    def exempt(self, name):
+        if name in self.cfg.exempt_users:
+            return True
+        return self.cfg.exempt_admins and self.sys.is_admin(name)
+
+    def assign_accounts(self, procs, now):
+        """uid -> child for every account whose Minecraft counts."""
+        uid_child = {}
+        for child, u in self.cfg.users.items():
+            for acc in u["accounts"]:
+                uid = self.sys.uid_of(acc)
+                if uid is None:
+                    if self.last_log.get(("nouser", acc)) is None:
+                        log.warning("%s: account %s does not exist on this Mac", child, acc)
+                        self.last_log[("nouser", acc)] = now
+                    continue
+                uid_child[uid] = child
+        wild = self.cfg.wildcard_user
+        for pid, uid, cmd in procs:
+            if uid in uid_child or uid < 500 or not is_minecraft(cmd):
+                continue
+            name = self.sys.name_of(uid)
+            if wild and not self.exempt(name):
+                uid_child[uid] = wild
+            elif self.last_log.get(("free", pid)) is None:
+                log.warning("Minecraft (PID %s) is running in account %s, which is not limited",
+                            pid, name)
+                self.last_log[("free", pid)] = now
+        return uid_child
+
     def tick(self):
         now = self.clock()
         if self.last_tick is None:
@@ -498,34 +576,40 @@ class Timer:
         console = self.sys.console_uid()
         idle = None
         changed = False
+        uid_child = self.assign_accounts(procs, now)
 
         for user in self.cfg.users:
-            try:
-                uid = pwd.getpwnam(user).pw_uid
-            except KeyError:
-                if self.last_log.get(("nouser", user)) is None:
-                    log.warning("User %s does not exist on this Mac", user)
-                    self.last_log[("nouser", user)] = now
-                continue
-
             st = self.store.user(user, today)
-            mc = [p for p in procs if p[1] == uid and is_minecraft(p[2])]
+            uids = {uid for uid, c in uid_child.items() if c == user}
+            mc = [p for p in procs if p[1] in uids and is_minecraft(p[2])]
             running = bool(mc)
-            at_screen = console == uid
+            accounts = tuple(sorted({self.sys.name_of(p[1]) for p in mc}))
+            at_screen = console is not None and any(p[1] == console for p in mc)
             if running and at_screen and idle is None:
                 idle = self.sys.idle_seconds()
             playing = running and at_screen and idle is not None and idle < self.cfg.idle_seconds
+            # messages go to the account in front of the screen, else to the game's owner
+            if at_screen:
+                uid = console
+            elif mc:
+                uid = mc[0][1]
+            else:
+                uid = self.sys.uid_of(user)
+            acct = self.sys.name_of(uid) if uid is not None else user
 
-            if running != self.running_prev.get(user, False):
-                log.info("%s: Minecraft %s (PIDs %s)", user,
-                         "started" if running else "stopped",
-                         ",".join(str(p[0]) for p in mc) or "-")
-                self.running_prev[user] = running
-                if running and to_bool(self.setting(user, "enabled")):
+            prev = self.running_prev.get(user, ())
+            if accounts != prev:
+                if accounts:
+                    log.info("%s: Minecraft running in account %s (PIDs %s)", user,
+                             ", ".join(accounts), ",".join(str(p[0]) for p in mc))
+                else:
+                    log.info("%s: Minecraft stopped", user)
+                self.running_prev[user] = accounts
+                if running and not prev and to_bool(self.setting(user, "enabled")):
                     rem = self.remaining(user, st, now)
                     if rem > 0:
                         tx = self.cfg.texts
-                        self.sys.notify(user, uid, tx["start_title"],
+                        self.sys.notify(acct, uid, tx["start_title"],
                                         tx["start_text"].format(m=tx.minutes(round(rem / 60))))
 
             if playing and delta > 0:
@@ -551,7 +635,7 @@ class Timer:
                     tx = self.cfg.texts
                     m = tx.minutes(max(1, round(rem / 60)))
                     log.info("%s: warning %d min (%.0f s left)", user, w, rem)
-                    self.sys.notify(user, uid, tx["warn_title"], tx["warn_text"].format(m=m),
+                    self.sys.notify(acct, uid, tx["warn_title"], tx["warn_text"].format(m=m),
                                     speak=tx["warn_speak"].format(m=m))
 
             # block
@@ -566,7 +650,7 @@ class Timer:
                         msg = tx["block_curfew"]
                     else:
                         msg = tx["block_limit"]
-                    self.sys.notify(user, uid, tx["block_title"], msg, speak=tx["block_speak"])
+                    self.sys.notify(acct, uid, tx["block_title"], msg, speak=tx["block_speak"])
                     self.last_block_note[user] = now
                 for pid, _, _ in mc:
                     t0 = self.signaled.get(pid)
@@ -580,16 +664,18 @@ class Timer:
                         self.signaled[pid] = now + 3600  # do not repeat every cycle
 
             self.snapshot[user] = self._snapshot(user, st, running, playing, enabled,
-                                                 blocked, in_curfew, rem)
+                                                 blocked, in_curfew, rem, accounts)
 
         alive_pids = {p[0] for p in procs}
         for pid in list(self.signaled):
             if pid not in alive_pids:
                 del self.signaled[pid]
+        for key in [k for k in self.last_log if k[0] == "free" and k[1] not in alive_pids]:
+            del self.last_log[key]
         if changed:
             self.store.save()
 
-    def _snapshot(self, user, st, running, playing, enabled, blocked, in_curfew, rem):
+    def _snapshot(self, user, st, running, playing, enabled, blocked, in_curfew, rem, accounts=()):
         day = dt.date.fromisoformat(st["date"])
         tx = self.cfg.texts
         if not enabled:
@@ -616,6 +702,7 @@ class Timer:
             "playing": "ON" if playing else "OFF",
             "day_type": tx["day_free"] if self.cfg.is_free_day(day) else tx["day_school"],
             "status": status,
+            "account": ", ".join(accounts) or "-",
         }
 
 
@@ -881,6 +968,8 @@ class HomeAssistantBridge:
                 "entity_category": "diagnostic"})
             ent("binary_sensor", "playing", tx["e_playing"], {
                 "value_template": "{{ value_json.playing }}", "icon": "mdi:controller"})
+            ent("sensor", "account", tx["e_account"], {
+                "value_template": "{{ value_json.account | default('-') }}", "icon": "mdi:account"})
             ent("binary_sensor", "running", tx["e_running"], {
                 "value_template": "{{ value_json.running }}", "icon": "mdi:application",
                 "entity_category": "diagnostic"})
@@ -997,6 +1086,15 @@ def check_permissions(paths):
             log.error("INSECURE: %s is not owned by root or is writable by others", p)
 
 
+def describe_users(cfg):
+    parts = []
+    for u, v in cfg.users.items():
+        acc = list(v["accounts"]) + (["all other non-exempt accounts"] if v["wildcard"] else [])
+        parts.append("%s %d/%d min (accounts: %s)" % (
+            u, v["weekday_minutes"], v["weekend_minutes"], ", ".join(acc)))
+    return "; ".join(parts)
+
+
 def setup_logging(path, verbose):
     handlers = []
     if path:
@@ -1049,8 +1147,7 @@ def main(argv=None):
     timer = Timer(cfg, store, system)
     bridge = HomeAssistantBridge(cfg, timer)
     log.info("minertimer %s started (%s, language %s), users: %s%s", VERSION, computer_name(), cfg.language,
-             ", ".join("%s %d/%d min" % (u, v["weekday_minutes"], v["weekend_minutes"])
-                       for u, v in cfg.users.items()),
+             describe_users(cfg),
              " [dry-run]" if args.dry_run else "")
 
     stop = {"flag": False}

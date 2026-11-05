@@ -86,6 +86,30 @@ if [[ ! -f "$CONF" ]]; then
   echo "Settings are in $CONF. Change them with: sudo vi \"$CONF\""
 else
   echo "== Keeping the existing configuration: $CONF"
+  # Update from before 2.3.0: offer to count Minecraft in all other accounts
+  if ! grep -qE '^[[:space:]]*accounts[[:space:]]*=' "$CONF"; then
+    kids=(${(f)"$(sed -nE 's/^\[user (.+)\][[:space:]]*$/\1/p' "$CONF")"})
+    if [[ ${#kids} -eq 1 ]]; then
+      echo "New in 2.3.0: Minecraft in other macOS accounts can count towards ${kids[1]}'s time."
+      read "acc?Count Minecraft in every non-administrator account for ${kids[1]}? [Y/n]: "
+      if [[ "${acc:-y}" == [yYjJ]* ]]; then
+        /usr/bin/python3 -I - "$CONF" "${kids[1]}" <<'PY2'
+import sys, re
+path, kid = sys.argv[1:3]
+text = open(path, encoding="utf-8").read()
+text = re.sub(r"(?m)^(\[user %s\][ \t]*\n)" % re.escape(kid),
+              lambda m: m.group(1) + "# Minecraft in every non-administrator account counts for this child\naccounts = *\n",
+              text, count=1)
+open(path, "w", encoding="utf-8").write(text)
+PY2
+        echo "  Added 'accounts = *' to [user ${kids[1]}]."
+      else
+        echo "  Unchanged. See minertimer.conf.example for 'accounts'."
+      fi
+    else
+      echo "Note: see minertimer.conf.example for the new 'accounts' setting (2.3.0)."
+    fi
+  fi
 fi
 chown root:wheel "$CONF"; chmod 600 "$CONF"
 

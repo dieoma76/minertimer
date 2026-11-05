@@ -24,6 +24,10 @@ kill_grace = 20
 holidays =
 # Voice for announcements (empty = system voice), e.g. Samantha or Anna
 voice =
+# Accounts that are never limited by "accounts = *" (parents, guests you trust)
+exempt_users =
+# Administrator accounts are never limited by "accounts = *"
+exempt_admins = true
 
 [mqtt]
 # Optional connection to Home Assistant (MQTT discovery).
@@ -37,9 +41,16 @@ discovery_prefix = homeassistant
 # Device name in Home Assistant (empty = computer name)
 device_name =
 
-# One section per macOS account that should be limited.
-# The name is the short account name (Terminal: id -un).
+# One section per child. The name is the child's main macOS account
+# (short name, Terminal: id -un) and is used in Home Assistant.
 [user CHILD]
+# Further macOS accounts whose Minecraft counts towards this child's time.
+# All of them share one daily budget.
+#   accounts = *            every account except administrators and exempt_users,
+#                           including accounts created later (only one child)
+#   accounts = emma2, guest only these accounts
+#   accounts =              only the main account
+accounts = *
 # Minutes on school days (Mon-Fri)
 weekday_minutes = 60
 # Minutes on free days (Sat, Sun, holidays)
@@ -49,7 +60,8 @@ curfew =
 # false = only count, never quit the game
 enabled = true
 
-# Another account, e.g. a second child:
+# A second child. Accounts listed in a section never count for "*" above.
 # [user child2]
+# accounts =
 # weekday_minutes = 45
 # weekend_minutes = 90

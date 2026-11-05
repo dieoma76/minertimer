@@ -8,12 +8,13 @@ English version: [README.md](README.md)
 
 ## Was es tut
 
-- **Es zählt nur echte Spielzeit.** Eine Sekunde zählt, wenn Minecraft läuft, das begrenzte Konto gerade vor dem Bildschirm sitzt und es in den letzten 3 Minuten Maus- oder Tastatureingaben gab. Ein vergessenes Spiel im Hintergrund, ein schlafender Mac oder ein anderer angemeldeter Benutzer verbrauchen keine Zeit.
+- **Es zählt nur echte Spielzeit.** Eine Sekunde zählt, wenn Minecraft läuft, ein Konto des Kindes gerade vor dem Bildschirm sitzt und es in den letzten 3 Minuten Maus- oder Tastatureingaben gab. Ein vergessenes Spiel im Hintergrund, ein schlafender Mac oder ein anderer angemeldeter Benutzer verbrauchen keine Zeit.
 - **Es erkennt nur das Spiel.** Erkannt wird der Minecraft-Client (Vanilla, Forge, NeoForge, Fabric, Quilt). Andere Java-Programme wie Entwicklungsumgebungen, Build-Werkzeuge oder ein eigener Server bleiben unberührt.
 - **Es warnt vor dem Ende.** Bei 10, 5 und 1 Minute Restzeit bekommt das Kind eine Mitteilung und eine Ansage. Zum Spielstart zeigt eine Mitteilung, wie viel Zeit heute noch übrig ist.
 - **Es beendet in zwei Stufen.** Bei Ablauf wird Minecraft erst höflich beendet und nach 20 Sekunden hart. Wird das Spiel neu gestartet, wird es sofort wieder beendet.
 - **Die Limits sind flexibel.** Es gibt eigene Limits für Schultage und freie Tage (Wochenende plus eingetragene Ferien). Eine optionale Sperrzeit wie `20:30-07:00` verbietet das Spielen ganz.
-- **Mehrere Kinder und Macs sind möglich.** Pro Konto gibt es einen `[user …]`-Abschnitt, pro Mac eine Installation.
+- **Es gilt pro Kind, nicht pro Konto.** Mit `accounts = *` zählt Minecraft in jedem Konto ohne Admin-Rechte auf das Limit des Kindes, auch in Konten, die später dazukommen. Ein Zweitkonto hilft also nicht mehr am Limit vorbei. Alternativ lassen sich die Konten einzeln aufzählen (`accounts = emma, emma2`).
+- **Mehrere Kinder und Macs sind möglich.** Pro Kind gibt es einen `[user …]`-Abschnitt, pro Mac eine Installation.
 - **Deutsch oder Englisch.** Mitteilungen, Ansagen und die Namen der Home-Assistant-Entitäten folgen der Systemsprache des Macs. Alternativ lässt sich die Sprache fest mit `language = de|en` einstellen.
 - **Home Assistant ist optional.** Die Anbindung läuft über MQTT-Discovery. Home Assistant zeigt dann Spielzeit, Restzeit und Status. Dort lassen sich die Limits ändern, ein Bonus geben, das Spiel sofort stoppen, die Sperrzeit setzen und das Limit an- und ausschalten. **Ohne Home Assistant funktioniert alles genauso**, eingestellt per Konfigurationsdatei.
 - **Es ist manipulationssicher.** Programm, Konfiguration und Zählerstand gehören root. Der Zählerstand übersteht Neustarts, und der Dienst startet nach einem Absturz von selbst neu.
@@ -64,11 +65,12 @@ Alle Optionen sind in [`minertimer.conf.example`](minertimer.conf.example) erkl�
 
 1. Lege einen Benutzer für minertimer an: Einstellungen → Personen → Benutzer. Er soll kein Administrator sein und sich nur aus dem lokalen Netz anmelden dürfen. Die Mosquitto-App akzeptiert Home-Assistant-Benutzer ohne weitere Einrichtung. Bei einem anderen Broker legst du dort einen MQTT-Benutzer an.
 2. Beantworte die MQTT-Frage in `install.sh` mit „y“ und gib Broker, Benutzer und Passwort ein. Alternativ trägst du den `[mqtt]`-Abschnitt später in die Konfiguration ein.
-3. Es erscheint das Gerät **„Minertimer &lt;Computername&gt;“** mit diesen Entitäten pro begrenztem Konto:
+3. Es erscheint das Gerät **„Minertimer &lt;Computername&gt;“** mit diesen Entitäten pro Kind:
 
 | Entität | Art |
 |---|---|
 | Spielzeit heute, Restzeit heute, Erlaubt heute, Status | Sensoren |
+| Spielt im Konto | Sensor: in welchem macOS-Konto Minecraft gerade läuft, sonst `-` |
 | spielt gerade | Binärsensor |
 | Limit Schultag, Limit freier Tag | Zahl (Konfiguration) |
 | Bonus heute | Zahl, wird um Mitternacht zurückgesetzt |
@@ -84,15 +86,17 @@ Beispiel-Dashboard mit den Entitäten als Kacheln:
 Werte, die in Home Assistant geändert werden, gelten, bis derselbe Wert in der Konfigurationsdatei geändert wird. Dann gewinnt wieder die Datei. Ist Home Assistant oder der Broker nicht erreichbar, läuft das Limit mit den zuletzt bekannten Werten weiter.
 
 MQTT-Themen:
-- Zustand: `minertimer/<mac>/<konto>/state` (JSON, retained)
-- Befehle: `minertimer/<mac>/<konto>/set/<feld>`
+- Zustand: `minertimer/<mac>/<kind>/state` (JSON, retained)
+- Befehle: `minertimer/<mac>/<kind>/set/<feld>`
 - Verfügbarkeit: `minertimer/<mac>/status`
 
 ## Grenzen
 
 minertimer ist ein Werkzeug für Eltern, kein Sicherheitsprodukt. Es hilft **nicht**, wenn:
 - das Kind ein Admin-Konto hat
-- das Kind in einem anderen Konto spielt, für das es keinen `[user …]`-Abschnitt gibt
+- das Kind in einem Admin-Konto oder einem Konto aus `exempt_users` spielt (Minecraft in Konten, die nicht begrenzt sind, steht als Warnung im Log)
+- das Kind ohne `accounts = *` in einem Konto spielt, das nicht in `accounts` steht
+- das Kind im Browser spielt (Nachbauten wie Eaglercraft sind kein Java-Prozess)
 - das Kind auf einem anderen Gerät spielt
 
 ## Hintergrund
