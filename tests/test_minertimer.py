@@ -389,6 +389,77 @@ class MqttSleepTests(unittest.TestCase):
         self.assertGreater(bridge.quiet_until, mt.time.time())
 
 
+@mock.patch.object(pwd, "getpwnam", return_value=FAKE_PW)
+class RetainedSettingsTests(unittest.TestCase):
+    """Settings are retained on the broker and come back after every reconnect."""
+
+    def _bridge(self, conf=CONF):
+        timer, s, clock, store, path = make(conf)
+        bridge = mt.HomeAssistantBridge(timer.cfg, timer)
+        bridge.client = mock.Mock(connected=True)
+        return bridge, timer, path
+
+    def _set(self, bridge, key, value):
+        bridge.on_message("%s/kid/set/%s" % (bridge.base, key), value)
+
+    def test_retained_value_applied_after_reconnect(self, _):
+        bridge, timer, _ = self._bridge()
+        self._set(bridge, "enabled", "OFF")
+        self.assertFalse(timer.setting("kid", "enabled"))
+        self._set(bridge, "enabled", "ON")   # e.g. retained value delivered on reconnect
+        self.assertTrue(timer.setting("kid", "enabled"))
+
+    def test_empty_payload_ignored(self, _):
+        bridge, timer, _ = self._bridge()
+        self._set(bridge, "enabled", "")     # deleted retained message
+        self.assertTrue(timer.setting("kid", "enabled"))
+
+    def test_curfew_dash_means_none(self, _):
+        bridge, timer, _ = self._bridge()
+        self._set(bridge, "curfew", "20:00-07:00")
+        self.assertEqual(timer.setting("kid", "curfew"), "20:00-07:00")
+        self._set(bridge, "curfew", "-")
+        self.assertEqual(timer.setting("kid", "curfew"), "")
+
+    def test_unchanged_value_logs_nothing(self, _):
+        bridge, timer, _ = self._bridge()
+        self._set(bridge, "weekday_minutes", "45")
+        with mock.patch.object(mt.log, "info") as info:   # assertNoLogs needs Python 3.10
+            self._set(bridge, "weekday_minutes", "45")
+        info.assert_not_called()
+
+    def test_file_wins_over_stale_retained_value(self, _):
+        bridge, timer, path = self._bridge()
+        self._set(bridge, "weekday_minutes", "45")
+        with open(path) as f:
+            text = f.read()
+        with open(path, "w") as f:
+            f.write(text.replace("weekday_minutes = 30", "weekday_minutes = 60"))
+        timer.cfg = mt.Config(path)
+        # the old retained value arrives again after a reconnect: it must not win
+        self._set(bridge, "weekday_minutes", "45")
+        self.assertEqual(timer.setting("kid", "weekday_minutes"), 60)
+        # the file value is put on the broker
+        bridge.publish_states()
+        bridge.client.publish.assert_any_call(bridge.base + "/kid/set/weekday_minutes", "60",
+                                              retain=True)
+        self.assertEqual(timer.to_sync, {})
+        self._set(bridge, "weekday_minutes", "60")   # our own message comes back
+        # a deliberate new change in Home Assistant works again
+        self._set(bridge, "weekday_minutes", "45")
+        self.assertEqual(timer.setting("kid", "weekday_minutes"), 45)
+
+    def test_discovery_retains_settings_not_buttons(self, _):
+        bridge, timer, _ = self._bridge()
+        bridge.publish_discovery()
+        cfgs = {c.args[0].split("/")[-2]: c.args[1] for c in bridge.client.publish.call_args_list
+                if c.args[0].endswith("/config")}
+        for key in ("enabled", "curfew", "weekday_minutes", "weekend_minutes"):
+            self.assertTrue(cfgs["minertimer_%s_kid_%s" % (bridge.host, key)].get("retain"), key)
+        for key in ("bonus_minutes", "bonus_15", "stop_now"):
+            self.assertFalse(cfgs["minertimer_%s_kid_%s" % (bridge.host, key)].get("retain"), key)
+
+
 class LanguageTests(unittest.TestCase):
     def test_detect_language(self):
         import plistlib

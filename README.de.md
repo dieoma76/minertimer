@@ -85,6 +85,8 @@ Beispiel-Dashboard mit den Entitäten als Kacheln:
 
 Werte, die in Home Assistant geändert werden, gelten, bis derselbe Wert in der Konfigurationsdatei geändert wird. Dann gewinnt wieder die Datei. Ist Home Assistant oder der Broker nicht erreichbar, läuft das Limit mit den zuletzt bekannten Werten weiter.
 
+Die Einstellungen (Limit aktiv, Limit Schultag, Limit freier Tag, Sperrzeit) speichert der Broker (retained). Schläft der Mac gerade, übernimmt minertimer eine Änderung beim Aufwachen. Bonus heute und die Tasten gelten nur für den Moment und werden nicht gespeichert. Solange der Mac offline ist, zeigt Home Assistant die Entitäten als nicht verfügbar.
+
 MQTT-Themen:
 - Zustand: `minertimer/<mac>/<kind>/state` (JSON, retained)
 - Befehle: `minertimer/<mac>/<kind>/set/<feld>`

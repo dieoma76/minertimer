@@ -85,6 +85,8 @@ Example dashboard (German UI) with the entities as tiles:
 
 Values changed in Home Assistant stay in effect until the same value is changed in the configuration file. Then the file wins again. If Home Assistant or the broker is unreachable, the limit keeps working with the last known values.
 
+The settings (limit active, school day limit, free day limit, curfew) are retained on the broker. If the Mac is asleep, minertimer applies a change when it wakes up. Bonus today and the buttons only apply at that moment and are not retained. While the Mac is offline, Home Assistant shows the entities as unavailable.
+
 MQTT topics:
 - state: `minertimer/<mac>/<child>/state` (JSON, retained)
 - commands: `minertimer/<mac>/<child>/set/<field>`

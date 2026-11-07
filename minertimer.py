@@ -31,7 +31,7 @@ import sys
 import tempfile
 import time
 
-VERSION = "2.3.1"
+VERSION = "2.3.2"
 
 DEFAULT_CONFIG = "/Library/Application Support/minertimer/minertimer.conf"
 DEFAULT_STATE_DIR = "/var/db/minertimer"
@@ -416,6 +416,18 @@ class Store:
 # --------------------------------------------------------------------------
 
 
+_MISSING = object()
+
+
+def setting_payload(key, value):
+    """Value as Home Assistant sends it on the set topic."""
+    if key == "enabled":
+        return "ON" if value else "OFF"
+    if key == "curfew":
+        return value or "-"
+    return str(value)
+
+
 class Timer:
     def __init__(self, cfg, store, system, clock=time.time, today=dt.date.today):
         self.cfg = cfg
@@ -429,6 +441,10 @@ class Timer:
         self.last_block_note = {}  # user -> time of last block message
         self.last_log = {}
         self.snapshot = {}       # user -> dict for MQTT
+        # Settings in Home Assistant are retained on the broker. When the config file
+        # wins over such a value, the stale retained value must not come back.
+        self.file_won = {}       # (user, key) -> dropped Home Assistant value
+        self.to_sync = {}        # (user, key) -> file value to publish to the broker
 
     # ---- effective settings (file + changes from Home Assistant) ----
 
@@ -439,7 +455,9 @@ class Timer:
             return base
         if ov.get("base") != base:
             # the file was changed since -> the file wins
-            self.store.overrides(user).pop(key, None)
+            dropped = self.store.overrides(user).pop(key, None)
+            self.file_won[(user, key)] = dropped.get("value")
+            self.to_sync[(user, key)] = base
             log.info("%s: setting %s taken from config file (%r), Home Assistant value dropped",
                      user, key, base)
             return base
@@ -449,14 +467,28 @@ class Timer:
         if user not in self.cfg.users:
             return False
         if key == "curfew":
-            parse_curfew(value)
             value = value.strip()
+            if value in ("-", "none"):  # Home Assistant sends "-" for "no curfew"
+                value = ""
+            parse_curfew(value)
         elif key == "enabled":
             value = to_bool(value)
         elif key in ("weekday_minutes", "weekend_minutes"):
             value = max(0, min(24 * 60, int(float(value))))
         else:
             return False
+        current = self.setting(user, key)   # also drops values the file has replaced
+        stale = self.file_won.get((user, key), _MISSING)
+        if value == current:
+            # unchanged, e.g. the retained value after a reconnect, or our own sync
+            if stale is not _MISSING and (user, key) not in self.to_sync:
+                del self.file_won[(user, key)]
+            return True
+        if stale is not _MISSING and value == stale:
+            log.debug("%s: ignoring old Home Assistant value for %s (%r), the file wins",
+                      user, key, value)
+            return True
+        self.file_won.pop((user, key), None)
         self.store.overrides(user)[key] = {"value": value, "base": self.cfg.users[user][key]}
         log.info("%s: %s set to %r (Home Assistant)", user, key, value)
         self.store.save()
@@ -994,7 +1026,7 @@ class HomeAssistantBridge:
                               ("weekend_minutes", tx["e_weekend"])):
                 ent("number", key, name, {
                     "value_template": "{{ value_json.%s }}" % key,
-                    "command_topic": setp + key, "min": 0, "max": 600, "step": 5,
+                    "command_topic": setp + key, "retain": True, "min": 0, "max": 600, "step": 5,
                     "mode": "box", "unit_of_measurement": "min", "icon": "mdi:timer-cog",
                     "entity_category": "config"})
             ent("number", "bonus_minutes", tx["e_bonus"], {
@@ -1007,12 +1039,15 @@ class HomeAssistantBridge:
                 "command_topic": setp + "stop_now", "payload_press": "STOP", "icon": "mdi:stop-circle"})
             ent("switch", "enabled", tx["e_enabled"], {
                 "value_template": "{{ value_json.enabled }}",
-                "command_topic": setp + "enabled", "payload_on": "ON", "payload_off": "OFF",
+                "command_topic": setp + "enabled", "retain": True,
+                "payload_on": "ON", "payload_off": "OFF",
                 "state_on": "ON", "state_off": "OFF", "icon": "mdi:shield-lock",
                 "entity_category": "config"})
             ent("text", "curfew", tx["e_curfew"], {
                 "value_template": "{{ value_json.curfew }}",
-                "command_topic": setp + "curfew", "min": 0, "max": 11,
+                "command_topic": setp + "curfew", "retain": True,
+                # an empty retained message would delete it, so "no curfew" is sent as "-"
+                "command_template": "{{ value if value else '-' }}", "min": 0, "max": 11,
                 "pattern": r"^$|^\d{1,2}:\d{2}-\d{1,2}:\d{2}$", "icon": "mdi:sleep",
                 "entity_category": "config"})
         log.log(logging.DEBUG if quiet else logging.INFO,
@@ -1036,6 +1071,8 @@ class HomeAssistantBridge:
         if not user:
             return
         key, value = parts[4], payload.strip()
+        if not value:
+            return  # a deleted retained message, not a command
         try:
             if key == "bonus_minutes":
                 self.timer.set_bonus(user, float(value))
@@ -1052,9 +1089,21 @@ class HomeAssistantBridge:
             log.warning("Invalid value from Home Assistant for %s/%s: %r (%s)", user, key, value, e)
         self.last_published.pop(user, None)  # publish state right away
 
+    def sync_settings(self):
+        """Puts file values that replaced a Home Assistant value on the broker."""
+        for (user, key), value in list(self.timer.to_sync.items()):
+            try:
+                self.client.publish("%s/%s/set/%s" % (self.base, slug(user), key),
+                                    setting_payload(key, value), retain=True)
+            except Exception as e:
+                log.warning("MQTT publish failed: %s", e)
+                return
+            del self.timer.to_sync[(user, key)]
+
     def publish_states(self, force=False):
         if not (self.client and self.client.connected):
             return
+        self.sync_settings()
         now = time.time()
         for user, snap in self.timer.snapshot.items():
             prev = self.last_published.get(user)
